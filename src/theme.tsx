@@ -2,6 +2,7 @@ import {createTheme, createBox, createText, createRestyleComponent, backgroundCo
 import { ComponentClass, createContext, useContext, useEffect, useRef, useState } from 'react';
 import * as ReactNative from 'react-native';
 import React from 'react';
+import Collapsible from 'react-native-collapsible';
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { IconProps } from '@expo/vector-icons/build/createIconSet';
 import { ModalProps } from 'react-native';
@@ -230,7 +231,8 @@ export type CardProps = BoxProps & {title?: React.ReactNode, icon?: React.ReactN
 export function Card({title, icon, children, iconFirst, headerPress, headerProps, collapsed, ...rest}: CardProps) {
   const props = useRestyle(boxRestyle, rest);
   const hprops = useRestyle(boxRestyle, headerProps ?? {});
-
+  
+  //animate collapse/expand
   return (
     <Box marginVertical="m" backgroundColor="cardPrimaryBackground" borderColor="highlight" borderWidth={1} {...props} >
       <Pressable onPress={headerPress} 
@@ -242,9 +244,11 @@ export function Card({title, icon, children, iconFirst, headerPress, headerProps
           <Box flexShrink={1} ><Text variant="big" fontSize={20} marginLeft={iconFirst===true ? "m" : "none"} >{title}</Text></Box> : title}
         {icon}
       </Pressable>
-      {collapsed ? <></> : <Box marginBottom="l" paddingTop="m" paddingHorizontal="m" >
-        {children}
-      </Box>}
+      {<Collapsible collapsed={collapsed ?? false} >
+        <Box marginBottom="l" paddingTop="m" paddingHorizontal="m" >
+          {children}
+        </Box>
+      </Collapsible>}
     </Box>
   );
 }

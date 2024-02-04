@@ -4,6 +4,7 @@ import * as Linking from "expo-linking"
 import React from "react"
 import {encode, decode} from "base-64"
 import * as SecureStore from 'expo-secure-store';
+import * as Notifications from "expo-notifications";
 import { API_ROOT, DiningCourt, ServerError, ServerErrorResponse, UserInfo, Auth, WSServerMessage, WS_URL, send, ServerUserInfo, UserWhere, Key, UPDATE_LIMIT } from "./servertypes";
 import { isRunning, sendToFriends, start, stop } from "./tasks";
 import { KEYTYPE_EC, keyPair64, secureMessageDecrypt64 } from "react-native-themis"
@@ -64,7 +65,7 @@ export type AppStatus =
 export type AppState = {
   loading: boolean,
   busy: boolean,
-  handleError: (title: string, body: string) => void,
+  handleError: (title: string, body: string, retry?: boolean) => Promise<{retry: boolean}>,
   auth?: Auth,
   status: AppStatus
 }
@@ -119,15 +120,12 @@ async function toUser(privateKey: string, courts: DiningCourt[], x: ServerUserIn
 
 export async function dispatch(req: AppRequest, state: AppState, setState: SetAppState, callback?: (err?: CallbackError) => boolean): Promise<void> {
   if (state.busy) {
-    console.error("dispatch called while busy");
+    console.error("dispatch called while busy", new Error().stack);
     return;
   }
 
   const stat = state.status;
-
-  let raise = (title: string, body: string) => {
-    state.handleError(title, body);
-  };
+  const raise = state.handleError;
   
   setState((state) => ({
     ...state,
@@ -152,31 +150,34 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
   
   let doReq = async (data: any, path: string, auth=state.auth) => {
     let res: any = null;
-    try {
-      res = await send(data, path, auth);
-    } catch (e) {
-      if (e instanceof ServerError) {
-        if (callback===undefined || callback(e.err)) switch (req.type) {
-          case "search": if (e.err.err=="userNotFound") {
-            setNState((x) => ({...x, search: {...x.search, result: undefined}}))
-            break;
-          }
-          default: 
-            if (state.status.type=="verifying" && e.err.err=="badToken") {
-              setState((x) => ({...x, status: {...x.status, badCode: true}}));
-            } else if (e.err.err=="badToken" || e.err.err=="expired") {
-              raise("Session expired", "Please log in again");
-              setState((x) => ({...x, status: {type: "registering"}}));
-            } else {
-              raise("Error", e.message);
+    while (true) {
+      try {
+        res = await send(data, path, auth);
+        break;
+      } catch (e) {
+        if (e instanceof ServerError) {
+          if (callback===undefined || callback(e.err)) switch (req.type) {
+            case "search": if (e.err.err=="userNotFound") {
+              setNState((x) => ({...x, search: {...x.search, result: undefined}}))
+              break;
             }
-        }
-      } else {
-        raise("Network error", (e as any).toString());
-        throw new HandledServerError();
-      }
+            default: 
+              if (state.status.type=="verifying" && e.err.err=="badToken") {
+                setState((x) => ({...x, status: {...x.status, badCode: true}}));
+              } else if (e.err.err=="badToken" || e.err.err=="expired") {
+                raise("Session expired", "Please log in again");
+                setState((x) => ({...x, status: {type: "registering"}}));
+              } else {
+                raise("Error", e.message);
+              }
+          }
 
-      throw new HandledServerError();
+          throw new HandledServerError();
+        } else {
+          if (!(await raise("Network error", (e as any).toString(), true)))
+            throw new HandledServerError();
+        }
+      }
     }
     
     return res;
@@ -274,14 +275,14 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
     setNState((x) => ({...x, self: {...x.self, where: nw}}));
   };
 
-  let makeNormalState = async (auth: Auth, key: Key, users: ServerUserInfo[]): Promise<NormalState> => {
+  let makeNormalState = async (auth: Auth, key: Key, users: ServerUserInfo[]) => {
     const [ui, fkeys] = await AsyncStorage.multiGet(["uiState", "friendKeys"]);
-    let friendKeys = fkeys[1]==null ? {} : JSON.parse(fkeys[1]);
+    let friendKeys: Record<string,string> = fkeys[1]==null ? {} : JSON.parse(fkeys[1]);
 
     //cull keys of friends that removed us while app is offline
-    for (let k in Object.keys(friendKeys)) {
-      if (users.find((x) => x.id==k)==undefined)
-        delete friendKeys[k];
+    for (const k in friendKeys) {
+      const x = users.find((x) => x.id==k)?.status;
+      if (x!="you" && x!="both") delete friendKeys[k];
     }
 
     await AsyncStorage.setItem("friendKeys", JSON.stringify(friendKeys));
@@ -291,9 +292,9 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
     const hasPerm = (await Location.getForegroundPermissionsAsync()).granted
       && (await Location.getBackgroundPermissionsAsync()).granted;
     
-    if (running && hasPerm) await start(courts, whereCb);
+    let u = await getUsers(key.private64, courts, users, auth.id);
 
-    return {
+    setState((x) => ({...x, auth, status: {
       type: "normal",
       background: running,
       key, friendKeys,
@@ -302,8 +303,10 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
       ws: makeWs(key.private64, courts, auth),
       courts: courts,
       ui: ui[1]===null ? {page: "Courts", collapsedCourts: []} : JSON.parse(ui[1]),
-      ...await getUsers(key.private64, courts, users, auth.id)
-    };
+      ...u
+    }}));
+
+    if (running && hasPerm) await start(courts, whereCb);
   };
 
   const regenKey = async (auth: Auth) => {
@@ -324,11 +327,9 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
 
   const doRefresh = async (auth: Auth, name: string|null, key: Key) => {
     //all users except possibly us have non null usernames
-    let newStat: AppStatus = name!==null ?
+    if (name!==null)
       await makeNormalState(auth, key, await doReq(null, "refresh", auth))
-      : { type: "naming", key };
-
-    setState((x) => ({ ...x, auth, status: newStat }));
+    else setState((x) => ({...x, auth, status: {type: "naming", key }}));
   };
 
   if (req.type=="reset" || req.type=="quit") {
@@ -399,6 +400,9 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
     case "start": {
       if (!stat.hasBackgroundLocationPermission)
         setState((x) => ({...x, loading: true}));
+
+      if (!(await Notifications.getPermissionsAsync()).granted)
+        await Notifications.requestPermissionsAsync();
 
       try {
         let a = await Location.requestForegroundPermissionsAsync();
@@ -479,8 +483,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
       const key: Key = JSON.parse(keyStr);
 
       if (name!==null) {
-        let normal = await makeNormalState(auth!, key, res);
-        setState((x) => ({...x, auth, status: normal}));
+        await makeNormalState(auth!, key, res);
       } else {
         setState((x) => ({...x, auth, status: {type: "naming", key}}));
       }
@@ -538,8 +541,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
       await doReq({name: req.name}, "setname");
 
       const users = await doReq({}, "refresh");
-      const ns = await makeNormalState(state.auth, stat.key, users);
-      setState((x) => ({...x, status: ns}))
+      await makeNormalState(state.auth, stat.key, users);
       break;
     }
     case "resetKey": {

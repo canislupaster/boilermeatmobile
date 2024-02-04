@@ -291,7 +291,10 @@ function Home({setActive}: {setActive: (act: ActiveModal) => void}) {
   const usersArray = useMemo(() =>
     Object.entries(stat.users)
       .filter(([a,b]) => a!=stat.self.id)
-      .map(([a,b]) => b), [stat.users]);
+      .map(([a,b]) => b), [stat.users])
+      .sort((a,b) =>
+        (a.status=="both" ? 0 : (a.status=="you" ? -1 : 1))
+          - 2*((b.where!==null ? 1 : 0) + (a.where!==null ? -1 : 0)));
       
   const pagerViewRef = useRef<PagerView|null>(null);
 
@@ -309,9 +312,10 @@ function Home({setActive}: {setActive: (act: ActiveModal) => void}) {
         : <></>}
       
       <PagerView ref={pagerViewRef} initialPage={stat.ui.page=="Courts" ? 0 : 1}
-        onPageSelected={(e) => 
-          app.req({type: "setUI", ui: {...stat.ui, page: e.nativeEvent.position==0 ? "Courts" : "Users"}})
-        }
+        onPageSelected={(e) => {
+          const page = e.nativeEvent.position==0 ? "Courts" : "Users";
+          if (page!=stat.ui.page) app.req({type: "setUI", ui: {...stat.ui, page}})
+        }}
         orientation="horizontal" style={{flex: 1}} >
         <View key="1" >
           <DiningCourts usersArray={usersArray}

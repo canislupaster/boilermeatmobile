@@ -4,9 +4,10 @@ import * as Linking from 'expo-linking';
 import React, { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 
 import {ThemeProvider} from '@shopify/restyle';
-import {theme, Box, Text, ImageBackground, Image, TextInput, LabeledTextInput, Button, Card, IconButton, Modal, ErrorModal, ModalOutside} from './theme';
+import {theme, Box, Text, ImageBackground, Image, TextInput, LabeledTextInput, Button, Card, IconButton, Modal, ErrorModal, ModalOutside, ChoiceModal} from './theme';
 import { useFonts } from 'expo-font';
 import { AppContext, AppRequest, AppState, SetAppState, dispatchErr } from './server';
 import { KeyResetPrompt, Naming, Register, Verify } from './register';
@@ -25,9 +26,19 @@ export default function App() {
   const defaultState: AppState = {
     loading: true,
     busy: false,
-    handleError: (name, message) =>
-      setModal(<ErrorModal closeModal={() => setModal(null)}
-        name={name} message={message}></ErrorModal>),
+    handleError: (name, message, retry=false) => new Promise((resolve, reject) => {
+      if (retry)
+        setModal(<ChoiceModal choose={(act) => {
+          setModal(null);
+          resolve({retry: act});
+        }} action="Try again"
+          name={name} message={message}></ChoiceModal>)
+      else setModal(<ErrorModal closeModal={() => {
+        setModal(null);
+        resolve({retry: false});
+      }}
+        name={name} message={message}></ErrorModal>)
+    }),
     status: {type: "registering"}
   };
 
@@ -69,6 +80,7 @@ export default function App() {
   if (!fontsLoaded && !fontError) return null;
   
   return (<SafeAreaView>
+    <StatusBar style="auto" backgroundColor={theme.colors.blood} />
     <ThemeProvider theme={theme}>
       <AppContext.Provider value={{state, req: (x,cb) => dispatchErr(x, state, setState,cb)}}>
         <Modal visible={state.loading} animationType="fade" >

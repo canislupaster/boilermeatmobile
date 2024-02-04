@@ -4,52 +4,58 @@ import * as TaskManager from 'expo-task-manager';
 import { isTaskRegisteredAsync } from "expo-task-manager";
 import { Auth, DiningCourt, Key, UserWhere, UserWhereObj, send } from "./servertypes";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as SecureStore from 'expo-secure-store';
-import { Feature, MultiPolygon, Polygon, booleanPointInPolygon, centroid, distance, polygon, union } from "@turf/turf";
+import * as SecureStore from "expo-secure-store";
+import * as Notifications from "expo-notifications";
+import { Feature, LineString, MultiLineString, MultiPolygon, Polygon, booleanPointInPolygon, centroid, distance, lineString, lineStringToPolygon, nearestPointOnLine, pointToLineDistance, polygon, union } from "@turf/turf";
 import { secureMessageEncrypt64 } from "react-native-themis";
 
 export const GEOFENCE_TASK = "geofence";
-export const LOCATION_TASK = "location";
-export const CHECK_ELE_TASK = "location-ele";
+export const BACKGROUND_TASK = "background";
 export const ACCURACY=10;
 const MIN_UPDATE_DURATION_MS = 15000;
 
 type HallRegion = {
   name: string,
   floor: string|null,
-  poly: Feature<Polygon>,
+  poly: number[][],
   eleStart: number|null,
   eleEnd: number|null
 };
 
-//for all our (>=1) special users living in hilly, right above the goddamn dining court
-type Active = {
-  badEle: string[],
-  in: string[]
+type BoundingCircle = {
+  lat: number, lon: number,
+  radius: number,
+  hallName: string
+};
+
+type Data = {
+  regions: HallRegion[],
+  circles: BoundingCircle[];
 };
 
 type WhereHandler = ((where: UserWhere|null) => void);
 let handleWhereChange: WhereHandler|null = null;
-let isStopping: boolean = false;
 
-const locationTaskOptions: Location.LocationTaskOptions = {
-  accuracy: Location.Accuracy.Balanced,
-  pausesUpdatesAutomatically: true,
-  // deferredUpdatesInterval: 1000*60,
-  showsBackgroundLocationIndicator: false,
-  foregroundService: {
-    notificationTitle: "Boilermeat is checking your location",
-    notificationBody: "You're in the vicinity of a dining court",
-    notificationColor: "#610d20"
-  }
-};
+const cb = (f: () => Promise<void>) => {f().catch(console.error);}
 
 function checkEle(h: HallRegion, coord: Location.LocationObjectCoords) {
   return (h.eleStart==null || coord.altitude! < h.eleStart)
     && (h.eleEnd==null || coord.altitude! > h.eleEnd);
 }
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: false,
+    shouldSetBadge: true
+  }),
+  handleError(notificationId, error) {
+    console.error("notification error", notificationId, error);
+  }
+});
+
 async function update(h?: HallRegion) {
+  console.log("update to", h);
   const id = await AsyncStorage.getItem("id");
 
   const friendKeys = await AsyncStorage.getItem("friendKeys");
@@ -60,6 +66,8 @@ async function update(h?: HallRegion) {
   const auth: Auth = {id, token};
 
   if (h===undefined) {
+    await Notifications.dismissAllNotificationsAsync();
+
     handleWhereChange?.(null);
     await SecureStore.deleteItemAsync("lastWhere");
     await send(null, "update", auth);
@@ -73,6 +81,7 @@ async function update(h?: HallRegion) {
     updated: new Date()
   };
 
+  let diff=false;
   if (lastWhere) {
     const lastWhereObj: UserWhereObj = JSON.parse(lastWhere);
     if (new Date(lastWhereObj.updated).getTime() + MIN_UPDATE_DURATION_MS > where.updated.getTime()) {
@@ -87,7 +96,25 @@ async function update(h?: HallRegion) {
       return;
     }
 
-    if (where.where == lastWhereObj.where) where.since=new Date(lastWhereObj.since);
+    if (where.where == lastWhereObj.where) {
+      where.since=new Date(lastWhereObj.since);
+    } else {
+      diff=true;
+    }
+  }
+
+  if (lastWhere==null || diff) {
+    await Notifications.dismissAllNotificationsAsync();
+
+    console.log("notifying");
+    await Notifications.scheduleNotificationAsync({
+      identifier: "whereUpdate",
+      content: {
+        title: `You're at ${where.where}!`,
+        body: "Head into the app to stop securely broadcasting to friends"
+      },
+      trigger: null
+    });
   }
 
   handleWhereChange?.(where);
@@ -118,130 +145,120 @@ export async function sendToFriends(friendKeys: Record<string, string>, auth: Au
   await send(Object.fromEntries(res as string[][]), "update", auth);
 }
 
-TaskManager.defineTask<{locations: Location.LocationObject[]}>(LOCATION_TASK, async ({ data, error }) => {
-  if (error) console.error(error);
-  console.log("location update", data);
+async function restartGeofencing(data: Data, loc?: Location.LocationObject) {
+  let active: string|null = null;
 
-  if (data!==null) {
-    let mostRecent: Location.LocationObject|null = null;
-    for (let loc of data.locations) {
-      if (loc.coords.altitude!==null
-        && (mostRecent==null || loc.timestamp>mostRecent.timestamp))
-        mostRecent = loc;
-    }
-    
-    if (mostRecent!==null) {
-      let active: Active = JSON.parse((await AsyncStorage.getItem("active"))!);
-      let halls: HallRegion[] = JSON.parse((await AsyncStorage.getItem("halls"))!);
-
-      await upAct(active, mostRecent);
-      
-      for (let h of halls) {
-        if (!active.in.includes(h.name)) continue;
-
-        console.log("checking", h.name);
-        if (booleanPointInPolygon([mostRecent.coords.longitude, mostRecent.coords.latitude], h.poly)) {
-          if (!isStopping)
-            await Location.startLocationUpdatesAsync(LOCATION_TASK, {
-              ...locationTaskOptions,
-              foregroundService: {
-                notificationTitle: `Inside ${h.name}${h.floor==null ? "" : ` (${h.floor})`}`,
-                notificationBody: "Open the app to stop sharing the news with your friends.",
-                notificationColor: "#1cb05f"
-              }
-            });
-
-          update(h).catch(console.error);
-          return;
-        }
-      }
-    }
+  loc = loc ?? await Location.getCurrentPositionAsync({accuracy: Location.Accuracy.High});
+  for (const circ of data.circles) {
+    if (distance([loc.coords.longitude, loc.coords.latitude],
+      [circ.lon, circ.lat], {units: "meters"})<=circ.radius)
+      active = circ.hallName;
   }
 
-  update().catch(console.error);;
-});
+  if (active==null) {
+    if (await SecureStore.getItemAsync("active")!==null)
+      await SecureStore.deleteItemAsync("active");
 
-async function upAct(active: Active, inLoc?: Location.LocationObject) {
-  console.log("upact", isStopping, await TaskManager.getRegisteredTasksAsync());
-  //to ensure all tasks are actually stopped when stop() is called we should make sure tasks cant start each other up again
-  if (isStopping) return;
-
-  let halls: HallRegion[] = JSON.parse((await AsyncStorage.getItem("halls"))!);
-  const loc = inLoc ?? await Location.getCurrentPositionAsync({accuracy: Location.Accuracy.High});
-
-  let newActive: Active = {in: [], badEle: []};
-  for (let name of [...active.badEle, ...active.in]) {
-    if (halls.find((x) => x.name==name && checkEle(x, loc.coords))==undefined) {
-      newActive.badEle.push(name);
-    } else {
-      newActive.in.push(name);
-    }
-  }
-
-  console.log("new active", newActive);
-  await AsyncStorage.setItem("active", JSON.stringify(newActive));
-
-  if (newActive.in.length > 0) {
-    await Location.startLocationUpdatesAsync(LOCATION_TASK, locationTaskOptions);
-
-    if (await TaskManager.isTaskRegisteredAsync(CHECK_ELE_TASK))
-      await BackgroundFetch.unregisterTaskAsync(CHECK_ELE_TASK);
+    await Location.startGeofencingAsync(GEOFENCE_TASK, data.circles.map((x) => ({
+      latitude: x.lat, longitude: x.lon, radius: x.radius,
+      identifier: x.hallName, notifyOnEnter: true, notifyOnExit: true
+    })));
   } else {
-    if (newActive.badEle.length>0) {
-      await BackgroundFetch.registerTaskAsync(CHECK_ELE_TASK, { minimumInterval: 30 });
-    } else if (await TaskManager.isTaskRegisteredAsync(CHECK_ELE_TASK)) {
-      await BackgroundFetch.unregisterTaskAsync(CHECK_ELE_TASK);
-    }
-    
-    if (await isTaskRegisteredAsync(LOCATION_TASK)) {
-      await Location.stopLocationUpdatesAsync(LOCATION_TASK);
-    }
-
-    update().catch(console.error);
+    await SecureStore.setItemAsync("active", active);
+    await geoFenceActive(data, active, loc);
   }
 }
 
-TaskManager.defineTask(CHECK_ELE_TASK, async () => {
-  let active: Active = JSON.parse((await AsyncStorage.getItem("active"))!);
-  console.log("checking elevation");
-  await upAct(active);
-});
+async function geoFenceActive(data: Data, active: string, loc?: Location.LocationObject) {
+  loc = loc ?? await Location.getCurrentPositionAsync({accuracy: Location.Accuracy.High});
+  const coord = [loc.coords.longitude, loc.coords.latitude];
 
-TaskManager.defineTask<{eventType: Location.GeofencingEventType, region: Location.LocationRegion}>(GEOFENCE_TASK, async ({data: {eventType, region}, error}) => {
+  let rad=Infinity, updated=false;
+  for (let reg of data.regions.filter((x) => x.name==active)) {
+    const inside = booleanPointInPolygon(coord, polygon([reg.poly]))
+
+    if (inside && !updated && checkEle(reg, loc.coords)){
+      await update(reg);
+      updated=true;
+    }
+
+    const nearest = pointToLineDistance(coord, lineString(reg.poly), {units: "meters"});
+    if (nearest<rad) rad=nearest;
+  }
+
+  if (!updated) await update();
+
+  //what the hell!
+  if (!isFinite(rad)) {console.error(`no lines in active region ${active}!`); return;}
+  console.log(`new circle with radius ${rad} from current loc ${coord.join(", ")} about ${active}`);
+
+  rad += 5;
+  const circ = data.circles.find((x) => x.hallName==active)!;
+
+  //mutually recursive :clown:
+  if (distance([loc.coords.longitude, loc.coords.latitude],
+    [circ.lon, circ.lat], {units: "meters"})>circ.radius)
+    restartGeofencing(data, loc);
+
+  return Location.startGeofencingAsync(GEOFENCE_TASK, [
+    {
+      latitude: circ.lat,
+      longitude: circ.lon,
+      radius: circ.radius,
+      identifier: "big",
+      notifyOnExit: true,
+      notifyOnEnter: false
+    }, {
+      latitude: loc.coords.latitude,
+      longitude: loc.coords.longitude,
+      radius: rad,
+      identifier: "small",
+      notifyOnExit: true,
+      notifyOnEnter: false
+    }
+  ]);
+}
+
+TaskManager.defineTask<{eventType: Location.GeofencingEventType, region: Location.LocationRegion}>(GEOFENCE_TASK, ({data: {eventType, region}, error}) => cb(async () => {
   if (error) console.error(error);
   console.log("geofence update", eventType, region);
 
-  let active: Active = JSON.parse((await AsyncStorage.getItem("active"))!);
-  let f = (x: string[]) => x.filter((hall: string) => hall!==region.identifier);
-  active.in = f(active.in); active.badEle = f(active.badEle);
+  const data = await AsyncStorage.getItem("halls");
+  const dataObj = JSON.parse(data!);
 
-  if (region.state==Location.GeofencingRegionState.Inside)
-    active.badEle.push(region.identifier!);
-  
-  await upAct(active);
-});
+  const active = await SecureStore.getItemAsync("active");
+
+  if (active==null && region.state==Location.GeofencingRegionState.Inside) {
+    await SecureStore.setItemAsync("active", region.identifier!);
+    await geoFenceActive(dataObj, region.identifier!);
+  } else if (active!==null && region.state==Location.GeofencingRegionState.Outside) {
+    if (region.identifier==="big") await restartGeofencing(dataObj);
+    else await geoFenceActive(dataObj, active);
+  }
+}));
+
+//occasionally restart geofencing
+TaskManager.defineTask(BACKGROUND_TASK, () => cb(async () => {
+  const data: Data = JSON.parse((await AsyncStorage.getItem("halls"))!);
+  await restartGeofencing(data);
+}))
 
 export async function start(halls: DiningCourt[], handler: WhereHandler) {
-  console.log("starting geofencing");
   handleWhereChange = handler;
   
-  let active: Active = {in: [], badEle: []};
-  const loc = await Location.getCurrentPositionAsync({accuracy: Location.Accuracy.High});
-  
-  let hallRegions: HallRegion[] = [];
-  let geoRegions = halls.map((hall): Location.LocationRegion => {
-    let polys = hall.floors.map((floor) => {
-      let poly = polygon([floor.poly]);
+  let data: Data = {regions: [], circles: []};
 
-      hallRegions.push({
+  for (let hall of halls) {
+    let polys = hall.floors.map((floor) => {
+      data.regions.push({
         name: hall.name,
         floor: floor.name,
-        poly,
+        poly: floor.poly,
         eleStart: floor.eleStart,
         eleEnd: floor.eleEnd
       });
 
-      return poly;
+      return polygon([floor.poly]);
     });
 
     let poly: Feature<Polygon|MultiPolygon> = polys[0];
@@ -256,43 +273,39 @@ export async function start(halls: DiningCourt[], handler: WhereHandler) {
       if (d>radius) radius = d;
     }
     
-    console.log("adding region", hall.name, cent.geometry.coordinates, radius)
-    
-    if (distance([loc.coords.longitude, loc.coords.latitude], cent.geometry.coordinates, {units: "meters"}) < radius) {
-      active.badEle.push(hall.name);
-    }
-    
-    return {
-      latitude: cent.geometry.coordinates[1],
-      longitude: cent.geometry.coordinates[0],
-      radius,
-      identifier: hall.name,
-      notifyOnEnter: true,
-      notifyOnExit: true
-    };
-  });
- 
-  isStopping=false;
-  await AsyncStorage.setItem("halls", JSON.stringify(hallRegions));
-  await upAct(active, loc);
+    data.circles.push({
+      lat: cent.geometry.coordinates[1],
+      lon: cent.geometry.coordinates[0],
+      radius, hallName: hall.name
+    });
 
-  await Location.startGeofencingAsync(GEOFENCE_TASK, geoRegions);
+    console.log("adding region", data.circles[data.circles.length-1]);
+  }
+ 
+  await AsyncStorage.setItem("halls", JSON.stringify(data));
+
+  await BackgroundFetch.registerTaskAsync(BACKGROUND_TASK, {
+    minimumInterval: 0
+  });
+
+  await restartGeofencing(data);
 }
 
 export async function isRunning() {
-  return await isTaskRegisteredAsync(GEOFENCE_TASK);
+  return await isTaskRegisteredAsync(GEOFENCE_TASK) || await isTaskRegisteredAsync(BACKGROUND_TASK);
 }
 
 export async function stop() {
   console.log("stopping");
-  isStopping=true;
+
+  await Notifications.dismissAllNotificationsAsync();
+
+  if (await isTaskRegisteredAsync(BACKGROUND_TASK))
+    await BackgroundFetch.unregisterTaskAsync(BACKGROUND_TASK).catch(() => {});
   if (await isTaskRegisteredAsync(GEOFENCE_TASK))
     //if permission changes while task is running, this method errors so have to unregister manually, which is also done below
     await Location.stopGeofencingAsync(GEOFENCE_TASK).catch(() => {});
-  if (await isTaskRegisteredAsync(CHECK_ELE_TASK))
-    await BackgroundFetch.unregisterTaskAsync(CHECK_ELE_TASK);
-  if (await isTaskRegisteredAsync(LOCATION_TASK))
-    await Location.stopLocationUpdatesAsync(LOCATION_TASK);
+
   await TaskManager.unregisterAllTasksAsync().catch(() => {});
   await SecureStore.deleteItemAsync("lastWhere");
 }
