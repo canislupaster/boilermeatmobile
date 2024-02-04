@@ -52,7 +52,6 @@ export type Key = {private64: string, public64: string};
   
 export const ENV = (process.env as any) as {EXPO_PUBLIC_API_ROOT: string, EXPO_PUBLIC_ROOT: string};
 export const API_ROOT = new URL(ENV.EXPO_PUBLIC_API_ROOT);
-console.log(API_ROOT.href);
 export const WS_URL = new URL("ws", API_ROOT);
 export const UPDATE_LIMIT = 5*60*1000;
 
@@ -72,12 +71,16 @@ export function validName(name: string) {
   return name.match(/^[a-zA-Z0-9_]{1,12}$/)!==null;
 }
 
+export function debug(...args: any[]) {
+  if (__DEV__) console.log(...args);
+}
+
+debug(API_ROOT.href);
+
 export async function send(data: any, path: string, auth?: Auth): Promise<ServerErrorResponse | any> {
   let res: any = null;
 
   let isGet = path=="refresh" || path=="courts";
-
-  console.log(`sending ${JSON.stringify(data)} to /api/${path} ${isGet ? "(GET)" : "(POST)"}`)
 
   let hmap = new Headers({"Content-Type": "application/json"});
   if (auth!==undefined) {
@@ -93,7 +96,7 @@ export async function send(data: any, path: string, auth?: Auth): Promise<Server
 
   let ret = await prom;
   let txt = await ret.text();
-  console.log(`received ${txt}`);
+  debug(`received ${txt}`);
   res = JSON.parse(txt);
 
   if (!ret.ok) {

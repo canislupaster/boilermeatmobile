@@ -5,7 +5,7 @@ import React from "react"
 import {encode, decode} from "base-64"
 import * as SecureStore from 'expo-secure-store';
 import * as Notifications from "expo-notifications";
-import { API_ROOT, DiningCourt, ServerError, ServerErrorResponse, UserInfo, Auth, WSServerMessage, WS_URL, send, ServerUserInfo, UserWhere, Key, UPDATE_LIMIT } from "./servertypes";
+import { API_ROOT, DiningCourt, ServerError, ServerErrorResponse, UserInfo, Auth, WSServerMessage, WS_URL, send, ServerUserInfo, UserWhere, Key, UPDATE_LIMIT, debug } from "./servertypes";
 import { isRunning, sendToFriends, start, stop } from "./tasks";
 import { KEYTYPE_EC, keyPair64, secureMessageDecrypt64 } from "react-native-themis"
 
@@ -140,7 +140,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
   
   let setNState = (cb: (state: NormalState) => NormalState) => setState((s) => {
     if (s.status.type!=="normal") {
-      console.log("abnormal state after request, probably logged out via socket or something...");
+      debug("abnormal state after request, probably logged out via socket or something...");
 
       return s;
     }
@@ -197,7 +197,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
         if (x.status.type != "normal" || x.status.ws != ws) return x;
 
         let retry = window.setTimeout(() => {
-          console.log("retrying websocket connection");
+          debug("retrying websocket connection");
 
           setState((y) => ({...y, status: {
             ...y.status,
@@ -216,14 +216,14 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
     });
 
     ws.addEventListener("close", (e) => {
-      console.log("websocket closed");
+      debug("websocket closed");
       restart();
     });
 
     ws.addEventListener("message", (e) => (async () => {
-      console.log("websocket event", e);
+      debug("websocket event", e);
       const msg = JSON.parse(e.data) as WSServerMessage;
-      console.log("websocket message", msg);
+      debug("websocket message", msg);
 
       switch (msg.type) {
         case "add":
@@ -333,7 +333,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
   };
 
   if (req.type=="reset" || req.type=="quit") {
-    console.log("quitting!");
+    debug("quitting!");
 
     setState((x) => ({
       ...x,
@@ -442,14 +442,14 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
       break;
     }
     default: {
-      console.log("couldn't handle (normal)", req);
+      debug("couldn't handle (normal)", req);
       throw BAD_STATE;
     }
   } } else { switch (req.type) {
     case "load": {
       let id = await AsyncStorage.getItem("id");
       let token = await SecureStore.getItemAsync("token");
-      console.log(`found ${id}, ${token}`);
+      debug(`found ${id}, ${token}`);
       
       if (id===null || token===null) {
         let email = await AsyncStorage.getItem("email");
@@ -551,7 +551,7 @@ export async function dispatch(req: AppRequest, state: AppState, setState: SetAp
       break;
     }
     default: {
-      console.log("couldn't handle", req);
+      debug("couldn't handle", req);
       throw BAD_STATE;
     }
   } }
@@ -574,7 +574,7 @@ export function dispatchErr(req: AppRequest, state: AppState, setState: SetAppSt
         window.clearTimeout(state.status.wsDisconnectRetry)
       }
 
-      console.log("new state", ns);
+      debug("new state", ns);
       return ns;
     })
   };

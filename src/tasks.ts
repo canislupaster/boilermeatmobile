@@ -2,7 +2,7 @@ import * as Location from "expo-location";
 import * as BackgroundFetch from "expo-background-fetch";
 import * as TaskManager from 'expo-task-manager';
 import { isTaskRegisteredAsync } from "expo-task-manager";
-import { Auth, DiningCourt, Key, UserWhere, UserWhereObj, send } from "./servertypes";
+import { Auth, DiningCourt, Key, UserWhere, UserWhereObj, debug, send } from "./servertypes";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
 import * as Notifications from "expo-notifications";
@@ -55,7 +55,7 @@ Notifications.setNotificationHandler({
 });
 
 async function update(h?: HallRegion) {
-  console.log("update to", h);
+  debug("update to", h);
   const id = await AsyncStorage.getItem("id");
 
   const friendKeys = await AsyncStorage.getItem("friendKeys");
@@ -92,7 +92,7 @@ async function update(h?: HallRegion) {
         updated: new Date(lastWhereObj.updated),
       });
 
-      console.log("too recent, not updating");
+      debug("too recent, not updating");
       return;
     }
 
@@ -106,7 +106,7 @@ async function update(h?: HallRegion) {
   if (lastWhere==null || diff) {
     await Notifications.dismissAllNotificationsAsync();
 
-    console.log("notifying");
+    debug("notifying");
     await Notifications.scheduleNotificationAsync({
       identifier: "whereUpdate",
       content: {
@@ -119,7 +119,7 @@ async function update(h?: HallRegion) {
 
   handleWhereChange?.(where);
   if (friendKeys==null) {
-    console.log("no friends to send location to, just displaying in app");
+    debug("no friends to send location to, just displaying in app");
     return;
   }
 
@@ -130,7 +130,7 @@ async function update(h?: HallRegion) {
 
 export async function sendToFriends(friendKeys: Record<string, string>, auth: Auth, where: UserWhere, privateKey: string) {
   const newWhere = JSON.stringify(where);
-  console.log("sending", newWhere);
+  debug("sending", newWhere);
   await SecureStore.setItemAsync("lastWhere", newWhere);
 
   const res = (await Promise.allSettled(Object.entries(friendKeys)
@@ -140,7 +140,7 @@ export async function sendToFriends(friendKeys: Record<string, string>, auth: Au
       .map((x) => x.status==="fulfilled" ? x.value : null)
       .filter((x) => x!==null);
 
-  console.log(`encoded to ${res.length} of ${Object.keys(friendKeys).length} friends`, res);
+  debug(`encoded to ${res.length} of ${Object.keys(friendKeys).length} friends`, res);
 
   await send(Object.fromEntries(res as string[][]), "update", auth);
 }
@@ -190,7 +190,7 @@ async function geoFenceActive(data: Data, active: string, loc?: Location.Locatio
 
   //what the hell!
   if (!isFinite(rad)) {console.error(`no lines in active region ${active}!`); return;}
-  console.log(`new circle with radius ${rad} from current loc ${coord.join(", ")} about ${active}`);
+  debug(`new circle with radius ${rad} from current loc ${coord.join(", ")} about ${active}`);
 
   rad += 5;
   const circ = data.circles.find((x) => x.hallName==active)!;
@@ -221,7 +221,7 @@ async function geoFenceActive(data: Data, active: string, loc?: Location.Locatio
 
 TaskManager.defineTask<{eventType: Location.GeofencingEventType, region: Location.LocationRegion}>(GEOFENCE_TASK, ({data: {eventType, region}, error}) => cb(async () => {
   if (error) console.error(error);
-  console.log("geofence update", eventType, region);
+  debug("geofence update", eventType, region);
 
   const data = await AsyncStorage.getItem("halls");
   const dataObj = JSON.parse(data!);
@@ -279,7 +279,7 @@ export async function start(halls: DiningCourt[], handler: WhereHandler) {
       radius, hallName: hall.name
     });
 
-    console.log("adding region", data.circles[data.circles.length-1]);
+    debug("adding region", data.circles[data.circles.length-1]);
   }
  
   await AsyncStorage.setItem("halls", JSON.stringify(data));
@@ -296,7 +296,7 @@ export async function isRunning() {
 }
 
 export async function stop() {
-  console.log("stopping");
+  debug("stopping");
 
   await Notifications.dismissAllNotificationsAsync();
 

@@ -136,7 +136,7 @@ export function DiningCourtView({court, usersInCourt, collapsed, toggle, selectU
   } headerProps={{
     padding: "m", style: {backgroundColor: court.color}
   }} iconFirst icon={
-    <Icon name={collapsed ? "arrow-up" : "arrow-down"}
+    <Icon name={collapsed ? "arrow-down" : "arrow-up"}
       marginRight="m" icon={Ionicons} />
   } headerPress={toggle} collapsed={collapsed} >
     {usersInCourt.length==0 ? 
@@ -438,24 +438,26 @@ export function Main() {
   } else if (active.type=="changeName") {
     return backScrollModal(<ChangeName oldName={stat.self.username} done={exit} />);
   } else if (active.type=="grant") {
+    const inlineIcon = (props: any, tx: number=0) => <Icon flex={1} iconProps={{size:20}}
+      style={{transform: [{translateY: 7},{translateX: tx}]}} {...props} />;
+
     return backScrollModal(
       <>
         <Text variant="med" >
           In bullets:
         </Text>
         {[
-          "The only stuff sent/stored on the server is which court/floor and how long you've been there (no raw coordinates)",
+          "The only stuff sent/stored on the server is which court/floor you are on and how long you've been there (no raw coordinates)",
           "All of this location information is end-to-end encrypted with ECC (and your friends can't change their keys without you having to re-add them)",
-          "The above information is only sent to those you've chosen to in the app (look for the link icon in the users tab)",
+          <>The above information is only sent to those you've chosen to in the app (look for the link {inlineIcon({name: "link", icon: FontAwesome6}, -1)} icon in the users tab)</>,
           "You can continue securely using the app without location services if you only want to know where your friends are."
         ].map((x,i) => <Box key={i} marginTop="s" >
           <Text>
-            <Icon flex={1} name="star" icon={Ionicons} iconProps={{size:20}} marginRight="s" style={{transform: [{translateY: 7}]}} />
-            {x}
+            {inlineIcon({name: "star", icon: Ionicons})}{x}
           </Text>
         </Box>)}
         <Box marginVertical="s" />
-        <Text>For more on how your location is used, see the{" "}
+        <Text>For more on how your location is used and the exact data used to identify your location, see the{" "}
           <Link onPress={() => Linking.openURL(new URL("/privacy", ENV.EXPO_PUBLIC_ROOT).href)} >
             privacy policy
           </Link>.
@@ -464,6 +466,9 @@ export function Main() {
           app.req({type: "start"});
           exit();
         }} >Fair enough</Button>
+        <Button marginTop="xs" borderColor="background" onPress={() => {
+          exit();
+        }} >Forget about it</Button>
       </>, "What's the beef with location privacy?");
   } else if (active.type=="search") {
     return backScrollModal(

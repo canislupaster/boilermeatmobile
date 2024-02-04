@@ -22,7 +22,7 @@ export const userColors: [string,boolean][] = [
 
 export const sinceColors: string[] = [
   "#0a8238",
-  "#edbf28",
+  "#bd8204",
   "#c72014"
 ];
 
